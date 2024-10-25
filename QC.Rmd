@@ -1,0 +1,230 @@
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(SeuratDisk)
+library(sctransform)
+library(ggplot2)
+library(harmony)
+library(ArchR)
+library(ggsci)
+```
+
+###### Preprocessing Steps
+
+# Load the dataset and create a Seurat Object
+```{r}
+ctrl_dir <- '../data/ctrl/filtered_feature_bc_matrix/'
+ctrl.data <- Read10X(data.dir =ctrl_dir)
+ctrl <- CreateSeuratObject(counts = ctrl.data)
+ctrl$condition <- "Ctrl"
+
+pd1_dir <- '../data/pd1/filtered_feature_bc_matrix/'
+pd1.data <- Read10X(data.dir =pd1_dir)
+pd1 <- CreateSeuratObject(counts = pd1.data)
+pd1$condition <- "Pd1"
+
+sample <- merge(ctrl, y = c(pd1))
+```
+
+# Look at the features
+```{r}
+sample[["percent.mt"]] <- PercentageFeatureSet(sample, pattern = "^mt-")
+VlnPlot(sample, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0)
+```
+```{r}
+sample
+```
+
+```{r}
+sample2 <- subset(sample, subset = nCount_RNA > 1000 & nCount_RNA < 25000 & percent.mt < 10)
+```
+
+```{r}
+sample2
+```
+
+```{r}
+VlnPlot(sample2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+```{r}
+sample2
+```
+
+```{r}
+SaveH5Seurat(sample2, filename = "./merged_raw_postQC.h5Seurat")
+```
+
+```{r}
+Convert("./merged_raw_postQC.h5Seurat", dest = "h5ad")
+```
+
+```{r}
+#### Load in doublet output
+scrub = read.csv('./scrublet-scores/all.csv',header=T,row.names=1)
+```
+
+```{r}
+sample2@meta.data$scrublet_score = scrub$scrublet_score
+sample2@meta.data$scrublet_cluster_score = scrub$scrublet_cluster_score
+sample2@meta.data$bh_pval = scrub$bh_pval
+```
+
+```{r}
+VlnPlot(sample2, group.by = "condition", features = "scrublet_score")
+```
+
+```{r}
+sample3 <- subset(
+  x = sample2,
+  subset = scrublet_score < 0.25
+)
+```
+
+```{r}
+sample3
+```
+
+```{r}
+saveRDS(sample3, "postQC_doublet.rds")
+```
+
+# SCTransform and filtering
+```{r}
+DefaultAssay(sample3) <- 'RNA'
+sample3 <- SCTransform(sample3, vars.to.regress = c("percent.mt", "nCount_RNA"), verbose = TRUE, method = "glmGamPoi")
+sample3 <- RunPCA(sample3, features = VariableFeatures(object = sample3), npcs=100, verbose=TRUE)
+```
+
+```{r}
+sample3 <- RunUMAP(sample3, reduction = "pca", dims = 1:30)
+sample3 <- FindNeighbors(sample3, reduction = "pca", dims = 1:30)
+sample3 <- FindClusters(sample3, graph.name = "SCT_snn", algorithm = 3, resolution = c(0.1, 0.3, 0.5), verbose = FALSE)
+```
+
+```{r}
+DimPlot(sample3, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "SCT_snn_res.0.5", cols = paletteDiscrete(unique(sample3$SCT_snn_res.0.5), set = "stallion"))
+```
+
+# DGE
+```{r}
+Idents(sample3) <- "SCT_snn_res.0.5"
+DefaultAssay(sample3) <- 'SCT'
+rna.markers <- FindAllMarkers(sample3, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25)
+write.csv(rna.markers, file ="./SCT_snn_res.0.5_DE.csv", quote = FALSE)
+```
+
+```{r}
+Idents(sample3) <- "SCT_snn_res.0.5"
+sample3 <- subset(sample3, idents = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16"))
+```
+
+```{r}
+DefaultAssay(sample3) <- 'RNA'
+sample3 <- SCTransform(sample3, vars.to.regress = c("percent.mt", "nCount_RNA"), verbose = TRUE, method = "glmGamPoi")
+sample3 <- RunPCA(sample3, features = VariableFeatures(object = sample3), npcs=100, verbose=TRUE)
+
+sample3 <- RunUMAP(sample3, reduction = "pca", dims = 1:50)
+sample3 <- FindNeighbors(sample3, reduction = "pca", dims = 1:50)
+sample3 <- FindClusters(sample3, graph.name = "SCT_snn", algorithm = 3, resolution = c(0.1,0.2,0.3,0.4,0.5), verbose = FALSE)
+```
+
+```{r}
+DimPlot(sample3, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "SCT_snn_res.0.1", cols = paletteDiscrete(unique(sample3$SCT_snn_res.0.1), set = "stallion"))
+
+DimPlot(sample3, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "condition", cols = paletteDiscrete(unique(sample3$condition), set = "stallion"))
+```
+
+```{r}
+DimPlot(sample3, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "SCT_snn_res.0.1", split.by = "condition", ncol = 2, cols = paletteDiscrete(unique(sample3$SCT_snn_res.0.1), set = "stallion"))
+```
+```{r}
+Idents(sample3) <- "SCT_snn_res.0.1"
+tcells <- subset(sample3, idents = c("1"))
+```
+
+```{r}
+VlnPlot(myeloid, features = "Ccr2", split.by = "condition")
+```
+```{r}
+DotPlot(myeloid, features = "Ccr2", group.by = "condition")
+```
+
+
+```{r}
+ggplot(sample3@meta.data, aes(x=condition, fill=SCT_snn_res.0.1)) + geom_bar(position = "fill") + theme_linedraw() + theme(axis.text.x = element_text(angle = 90)) +  scale_fill_manual(values=as.vector(paletteDiscrete(unique(sample3$SCT_snn_res.0.1), set = "stallion"))) + theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()) 
+```
+
+# DGE
+```{r}
+Idents(sample3) <- "SCT_snn_res.0.1"
+DefaultAssay(sample3) <- 'SCT'
+rna.markers <- FindAllMarkers(sample3, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25)
+write.csv(rna.markers, file ="./postProcess/SCT_snn_res.0.1_DE.csv", quote = FALSE)
+```
+# Analyze Myeloid
+```{r}
+myeloid <- subset(sample3, idents = c("0","7","3","2"))
+```
+
+```{r}
+DefaultAssay(myeloid) <- 'RNA'
+myeloid <- SCTransform(myeloid, vars.to.regress = c("percent.mt", "nCount_RNA"), verbose = TRUE, method = "glmGamPoi")
+myeloid <- RunPCA(myeloid, features = VariableFeatures(object = myeloid), npcs=100, verbose=TRUE)
+myeloid <- RunUMAP(myeloid, reduction = "pca", dims = 1:50)
+myeloid <- FindNeighbors(myeloid, reduction = "pca", dims = 1:50)
+myeloid <- FindClusters(myeloid, graph.name = "SCT_snn", algorithm = 3, resolution = c(0.4), verbose = FALSE)
+```
+
+```{r}
+DimPlot(myeloid, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "SCT_snn_res.0.4", cols = paletteDiscrete(unique(myeloid$SCT_snn_res.0.4), set = "stallion"))
+```
+
+```{r}
+DimPlot(myeloid, reduction = 'umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "SCT_snn_res.0.4", split.by = "condition", ncol = 2, cols = paletteDiscrete(unique(myeloid$SCT_snn_res.0.4), set = "stallion"))
+```
+
+```{r}
+ggplot(myeloid@meta.data, aes(x=condition, fill=SCT_snn_res.0.4)) + geom_bar(position = "fill") + theme_linedraw() + theme(axis.text.x = element_text(angle = 90)) +  scale_fill_manual(values=as.vector(paletteDiscrete(unique(myeloid$SCT_snn_res.0.4), set = "stallion"))) + theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()) 
+```
+```{r}
+Idents(myeloid) <- "SCT_snn_res.0.4"
+DefaultAssay(myeloid) <- 'SCT'
+rna.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25)
+write.csv(rna.markers, file ="./postProcess/myeloid/DE_SCT_snn_res.0.4.csv", quote = FALSE)
+```
+```{r}
+saveRDS(myeloid, "./postProcess/myeloid/myeloid.rds")
+```
+
+
+```{r}
+Idents(myeloid) <- "condition"
+DefaultAssay(myeloid) <- 'SCT'
+rna.markers <- FindAllMarkers(myeloid, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25)
+write.csv(rna.markers, file ="./postProcess/myeloid/DE_condition.csv", quote = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
